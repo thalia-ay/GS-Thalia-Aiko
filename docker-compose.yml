@@ -1,0 +1,12 @@
+services:
+  web:
+    build: .
+    ports:
+      - "8544:8544"
+    environment:
+      PORTA: "8544"
+  banco:
+    image: postgres:11
+    environment:
+      POSTGRES_USER: market
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Defina POSTGRES_PASSWORD}"

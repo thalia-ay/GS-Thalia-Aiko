@@ -1,0 +1,15 @@
+title = "Citizen Tech Market - regras complementares"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "credencial-fixa-python"
+description = "Credencial fixa em configuracao ou codigo Python"
+regex = '''(?i)(?:secret_key["']?\s*\]?\s*=|senha\s*=|jwt\.encode\([^\r\n]*?,)\s*["']([^"'\r\n{}]{8,})["']'''
+secretGroup = 1
+
+[[rules]]
+id = "tokens-adicionais"
+description = "Tokens GitHub, Slack, Stripe e GitLab"
+regex = '''(?:ghp_[A-Za-z0-9]{36}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|glpat-[A-Za-z0-9_-]{20,})'''

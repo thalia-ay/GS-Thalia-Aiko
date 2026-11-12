@@ -1,0 +1,18 @@
+rules:
+  - id: python-sql-query-interpolation
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Consulta SQL construída por interpolação ou concatenação.
+      Use parâmetros vinculados no execute em vez de inserir valores no SQL.
+    metadata:
+      category: security
+      confidence: HIGH
+      impact: HIGH
+      cwe:
+        - "CWE-89: SQL Injection"
+    pattern-either:
+      - pattern: $CUR.execute($QUERY % $VALUE, ...)
+      - pattern: $CUR.execute(f"...{$VALUE}...", ...)
+      - pattern: $CUR.execute($QUERY.format(...), ...)
+      - pattern: $CUR.execute($QUERY + $VALUE, ...)

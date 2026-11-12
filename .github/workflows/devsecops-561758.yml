@@ -1,0 +1,352 @@
+name: Citizen Tech Market - RM 561758
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: 1 - Build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Construir a imagem
+        run: |
+          mkdir -p reports
+          docker build -t ctmarket:561758 . 2>&1 | tee reports/build.txt
+          docker save ctmarket:561758 | gzip > reports/imagem.tar.gz
+
+      - name: Guardar imagem para os demais jobs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: imagem-build
+          path: reports/imagem.tar.gz
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Publicar log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: build
+          path: reports/build.txt
+          if-no-files-found: error
+
+  sast:
+    name: 2 - SAST Semgrep
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Analisar codigo e bloquear achados
+        run: |
+          mkdir -p reports
+          docker run --rm \
+            -v "$PWD:/src" \
+            semgrep/semgrep:1.90.0 \
+            semgrep scan \
+            --config p/python \
+            --config p/flask \
+            --config p/security-audit \
+            --config p/owasp-top-ten \
+            --config /src/security/sql-python.yml \
+            --metrics=off \
+            --no-git-ignore \
+            --error \
+            --json \
+            --output /src/reports/sast.json \
+            /src
+
+      - name: Publicar relatorio
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sast
+          path: reports/sast.json
+          if-no-files-found: error
+
+  segredos:
+    name: 3 - Segredos Gitleaks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+
+      - name: Verificar historico e arvore
+        run: |
+          mkdir -p reports
+          set +e
+          docker run --rm -v "$PWD:/src" \
+            zricethezav/gitleaks:v8.21.2 detect \
+            --source /src \
+            --config /src/.gitleaks.toml \
+            --log-opts="--all" \
+            --redact=100 \
+            --report-format json \
+            --report-path /src/reports/segredos-historico.json
+          historico=$?
+
+          docker run --rm -v "$PWD:/src" \
+            zricethezav/gitleaks:v8.21.2 detect \
+            --no-git \
+            --source /src \
+            --config /src/.gitleaks.toml \
+            --redact=100 \
+            --report-format json \
+            --report-path /src/reports/segredos-arvore.json
+          arvore=$?
+          set -e
+
+          if (( historico != 0 || arvore != 0 )); then
+            echo "Gate reprovado: segredo encontrado ou erro no scanner."
+            exit 1
+          fi
+
+      - name: Publicar relatorios
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: segredos
+          path: reports/segredos-*.json
+          if-no-files-found: error
+
+  sca:
+    name: 4 - SCA Trivy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Analisar todos os manifestos
+        run: |
+          mkdir -p reports
+          docker run --rm -v "$PWD:/src" \
+            aquasec/trivy:0.58.2 fs \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            --format json \
+            --output /src/reports/sca.json \
+            /src
+
+      - name: Publicar relatorio
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sca
+          path: reports/sca.json
+          if-no-files-found: error
+
+  testes:
+    name: 5 - Testes
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: imagem-build
+          path: image-artifact
+
+      - name: Executar testes na imagem
+        run: |
+          mkdir -p reports
+          gunzip -c image-artifact/imagem.tar.gz | docker load
+          envfile="$RUNNER_TEMP/testes.env"
+          python3 scripts/ambiente-ci.py "$envfile"
+          trap 'rm -f "$envfile"' EXIT
+
+          docker run --rm \
+            --env-file "$envfile" \
+            ctmarket:561758 \
+            python -m unittest discover -s tests -p 'test_*.py' -v \
+            2>&1 | tee reports/testes.txt
+
+      - name: Publicar resultado
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: testes
+          path: reports/testes.txt
+          if-no-files-found: error
+
+  imagem:
+    name: 6 - Build e varredura da imagem
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: imagem-build
+          path: image-artifact
+
+      - name: Carregar a imagem construida
+        run: |
+          mkdir -p reports
+          gunzip -c image-artifact/imagem.tar.gz | docker load
+
+      - name: Verificar Dockerfile e imagem
+        run: |
+          set +e
+          docker run --rm -v "$PWD:/src" \
+            aquasec/trivy:0.58.2 config \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            --format json \
+            --output /src/reports/trivy-config.json \
+            /src
+          config=$?
+
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD:/src" \
+            aquasec/trivy:0.58.2 image \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            --format json \
+            --output /src/reports/trivy-image.json \
+            ctmarket:561758
+          imagem=$?
+          set -e
+
+          if (( config != 0 || imagem != 0 )); then
+            echo "Gate reprovado: configuracao, vulnerabilidade ou erro."
+            exit 1
+          fi
+
+      - name: Publicar relatorios
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: imagem
+          path: reports/*.json
+          if-no-files-found: error
+
+  dast:
+    name: 7 - DAST ativo OWASP ZAP
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: imagem-build
+          path: image-artifact
+
+      - name: Subir a aplicacao
+        run: |
+          mkdir -p reports
+          chmod 777 reports
+          gunzip -c image-artifact/imagem.tar.gz | docker load
+          envfile="$RUNNER_TEMP/dast.env"
+          python3 scripts/ambiente-ci.py "$envfile"
+          trap 'rm -f "$envfile"' EXIT
+
+          docker run -d --name market \
+            --env-file "$envfile" \
+            -p 127.0.0.1:8544:8544 \
+            ctmarket:561758
+
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8544/ >/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8544/ >/dev/null
+
+      - name: Varredura ativa e gate
+        run: |
+          docker run --rm --network host \
+            -v "$PWD/reports:/zap/wrk:rw" \
+            -v "$PWD/scripts:/zap/hooks:ro" \
+            ghcr.io/zaproxy/zaproxy:2.15.0 \
+            zap-full-scan.py \
+            -t http://127.0.0.1:8544/ \
+            -P 8091 \
+            --hook /zap/hooks/zap_rotas.py \
+            -a -j \
+            -J dast.json
+
+      - name: Encerrar aplicacao
+        if: always()
+        run: |
+          if docker container inspect market >/dev/null 2>&1; then
+            docker logs market > reports/aplicacao.txt 2>&1
+            docker rm -f market
+          fi
+
+      - name: Publicar relatorios
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dast
+          path: reports/
+          if-no-files-found: error
+
+  deploy:
+    name: 8 - Deploy protegido
+    needs: [build, sast, segredos, sca, testes, imagem, dast]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: producao
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: imagem-build
+          path: image-artifact
+
+      - name: Publicar a imagem aprovada
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gunzip -c image-artifact/imagem.tar.gz | docker load
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_SHA}"
+          printf '%s' "$GH_TOKEN" |
+            docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker tag ctmarket:561758 "$image"
+          docker push "$image"
+          printf 'Imagem aprovada: `%s`\n' "$image" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Acionar hospedagem
+        env:
+          DEPLOY_HOOK_URL: ${{ secrets.DEPLOY_HOOK_URL }}
+        run: |
+          if [[ -z "$DEPLOY_HOOK_URL" ]]; then
+            echo "Configure DEPLOY_HOOK_URL no environment producao."
+            exit 1
+          fi
+          curl --fail --silent --show-error \
+            --output /dev/null \
+            --request POST "$DEPLOY_HOOK_URL"

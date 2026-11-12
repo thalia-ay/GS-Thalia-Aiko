@@ -139,7 +139,7 @@ jobs:
         run: |
           mkdir -p reports
           docker run --rm -v "$PWD:/src" \
-            aquasec/trivy:0.58.2 fs \
+            aquasec/trivy:0.76.0 fs \
             --scanners vuln \
             --severity HIGH,CRITICAL \
             --exit-code 1 \
@@ -212,7 +212,7 @@ jobs:
         run: |
           set +e
           docker run --rm -v "$PWD:/src" \
-            aquasec/trivy:0.58.2 config \
+            aquasec/trivy:0.76.0 config \
             --severity HIGH,CRITICAL \
             --exit-code 1 \
             --format json \
@@ -223,7 +223,7 @@ jobs:
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$PWD:/src" \
-            aquasec/trivy:0.58.2 image \
+            aquasec/trivy:0.76.0 image \
             --scanners vuln \
             --severity HIGH,CRITICAL \
             --exit-code 1 \
